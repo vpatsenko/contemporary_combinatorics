@@ -40,7 +40,7 @@ class PeakMemoryTracker:
         self.peak_rss = 0
         self._stop_event = Event()
         self._thread = None
-    
+
     def _sample_loop(self):
         while not self._stop_event.is_set():
             if self.include_children:
@@ -50,13 +50,13 @@ class PeakMemoryTracker:
             if current > self.peak_rss:
                 self.peak_rss = current
             time.sleep(self.interval)
-    
+
     def start(self):
         self._stop_event.clear()
         self.peak_rss = get_rss_mb()
         self._thread = Thread(target=self._sample_loop, daemon=True)
         self._thread.start()
-    
+
     def stop(self):
         self._stop_event.set()
         if self._thread:
@@ -66,12 +66,12 @@ class PeakMemoryTracker:
 
 def memory_intensive_task(size_mb=50):
     data = bytearray(size_mb * 1024 * 1024)
-    
+
     for i in range(0, len(data), 1024 * 1024):
         data[i] = i % 256
-    
+
     time.sleep(0.1)
-    
+
     return sum(data[::1024 * 1024])
 
 
@@ -90,24 +90,24 @@ def run_multi_threaded(num_tasks, size_mb):
     for _ in range(num_tasks):
         t = Thread(target=memory_intensive_task, args=(size_mb,))
         threads.append(t)
-    
+
     for t in threads:
         t.start()
-    
+
     for t in threads:
         t.join()
 
 
 def run_multi_processing(num_tasks, size_mb):
     processes = []
-    
+
     for _ in range(num_tasks):
         p = Process(target=memory_task_for_process, args=(size_mb,))
         processes.append(p)
-    
+
     for p in processes:
         p.start()
-    
+
     for p in processes:
         p.join()
 
@@ -115,87 +115,87 @@ def run_multi_processing(num_tasks, size_mb):
 def measure_memory(name, func, num_tasks, size_mb, include_children=False):
     gc.collect()
     time.sleep(0.05)
-    
+
     rss_before = get_rss_mb()
-    
+
     tracker = PeakMemoryTracker(interval=0.01, include_children=include_children)
     tracker.start()
-    
+
     start_time = time.perf_counter()
     func(num_tasks, size_mb)
     end_time = time.perf_counter()
-    
+
     peak_rss = tracker.stop()
     rss_after = get_rss_mb()
-    
+
     print(f"  Time: {end_time - start_time:.4f} seconds")
     print(f"  RSS before: {rss_before:.2f} MB")
     print(f"  RSS peak: {peak_rss:.2f} MB")
     print(f"  RSS after: {rss_after:.2f} MB")
     print(f"  RSS delta (peak - before): {peak_rss - rss_before:.2f} MB")
-    
+
     return peak_rss
 
 
 def main():
     print(f"Python Version: {sys.version}")
-    
+
     py_version = float(".".join(sys.version.split()[0].split(".")[:2]))
     status = sysconfig.get_config_var("Py_GIL_DISABLED")
-    
+
     if py_version >= 3.13:
         status = sys._is_gil_enabled()
-    
+
     if status is None:
         print("GIL cannot be disabled for Python <= 3.12")
     elif status == 0:
         print("GIL is currently DISABLED (free-threading)")
     elif status == 1:
         print("GIL is currently ACTIVE")
-    
+
     print("\n" + "=" * 60)
     print("MEMORY BENCHMARK (RSS-based)")
     print("=" * 60)
-    
+
     num_tasks = 4
     size_mb = 50
-    
+
     print(f"\nConfiguration:")
     print(f"  Number of tasks: {num_tasks}")
     print(f"  Memory per task: ~{size_mb} MB")
     print(f"  Expected peak (sequential): ~{size_mb} MB")
     print(f"  Expected peak (parallel): ~{num_tasks * size_mb} MB")
-    
+
     gc.collect()
     time.sleep(0.1)
     baseline_rss = get_rss_mb()
     print(f"\nBaseline RSS: {baseline_rss:.2f} MB")
-    
+
     print("\n" + "-" * 60)
     print("SINGLE-THREADED (Sequential)")
     print("-" * 60)
     print("Note: Memory reused between tasks, GC runs between iterations")
     measure_memory("single_threaded", run_single_threaded, num_tasks, size_mb)
-    
+
     gc.collect()
     time.sleep(0.1)
-    
+
     print("\n" + "-" * 60)
     print("MULTI-THREADED (Shared Memory Space)")
     print("-" * 60)
     print("Note: All threads share memory space, run concurrently")
     measure_memory("multi_threaded", run_multi_threaded, num_tasks, size_mb)
-    
+
     gc.collect()
     time.sleep(0.1)
-    
+
     print("\n" + "-" * 60)
     print("MULTI-PROCESSING (Separate Memory Spaces)")
     print("-" * 60)
     print("Note: Each process has separate memory + interpreter overhead")
-    measure_memory("multi_processing", run_multi_processing, num_tasks, size_mb, 
+    measure_memory("multi_processing", run_multi_processing, num_tasks, size_mb,
                    include_children=True)
-    
+
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
