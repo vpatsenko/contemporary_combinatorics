@@ -15,44 +15,49 @@ func getRSSMB() float64 {
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &rusage); err != nil {
 		return 0
 	}
+
 	rss := float64(rusage.Maxrss)
-	if rss > 10*1024*1024*1024 {
-		return rss / (1024 * 1024)
+
+	// ru_maxrss units:
+	// - macOS (darwin): bytes
+	// - Linux: kilobytes
+	// - BSDs: often kilobytes (varies), but Linux rule works for most non-darwin here.
+	if runtime.GOOS == "darwin" {
+		return rss / (1024 * 1024) // bytes -> MB
 	}
-	return rss / 1024
+	return rss / 1024 // KB -> MB
 }
 
-func getCurrentRSSMB() float64 {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	return float64(m.Sys) / (1024 * 1024)
-}
 
 type PeakMemoryTracker struct {
 	peakRSS  atomic.Value
 	stopChan chan struct{}
 	wg       sync.WaitGroup
+	interval time.Duration
 }
 
-func NewPeakMemoryTracker() *PeakMemoryTracker {
+func NewPeakMemoryTracker(interval time.Duration) *PeakMemoryTracker {
 	t := &PeakMemoryTracker{
 		stopChan: make(chan struct{}),
+		interval: interval,
 	}
 	t.peakRSS.Store(float64(0))
 	return t
 }
 
 func (t *PeakMemoryTracker) Start() {
-	t.peakRSS.Store(getCurrentRSSMB())
+	t.peakRSS.Store(getRSSMB())
 	t.wg.Add(1)
+
 	go func() {
 		defer t.wg.Done()
-		ticker := time.NewTicker(10 * time.Millisecond)
+		ticker := time.NewTicker(t.interval)
 		defer ticker.Stop()
+
 		for {
 			select {
 			case <-ticker.C:
-				current := getCurrentRSSMB()
+				current := getRSSMB()
 				for {
 					old := t.peakRSS.Load().(float64)
 					if current <= old {
@@ -75,20 +80,26 @@ func (t *PeakMemoryTracker) Stop() float64 {
 	return t.peakRSS.Load().(float64)
 }
 
+// memoryIntensiveTask allocates ~sizeMB and TOUCHES EACH PAGE so RSS reflects committed memory.
+// This matches the "touch per page" fix used in the Python benchmark.
 func memoryIntensiveTask(sizeMB int) int64 {
 	numBytes := sizeMB * 1024 * 1024
 	data := make([]byte, numBytes)
 
-	for i := 0; i < len(data); i += 1024 * 1024 {
-		data[i] = byte(i % 256)
+	// Touch each OS page to force physical commitment and make RSS meaningful.
+	page := os.Getpagesize()
+	for i := 0; i < len(data); i += page {
+		data[i] = byte((int(data[i]) + 1) & 0xFF)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	// Keep it around briefly so the peak sampler sees it.
+	time.Sleep(200 * time.Millisecond)
 
+	// Use a few bytes so the compiler can't "prove" the buffer unused.
 	var total int64
-	for i := 0; i < len(data); i += 1024 * 1024 {
-		total += int64(data[i])
-	}
+	total += int64(data[0])
+	total += int64(data[len(data)/2])
+	total += int64(data[len(data)-1])
 
 	runtime.KeepAlive(data)
 	return total
@@ -111,7 +122,6 @@ func runMultiThreaded(numTasks, sizeMB int) {
 			memoryIntensiveTask(sizeMB)
 		}()
 	}
-
 	wg.Wait()
 }
 
@@ -119,9 +129,9 @@ func measureMemory(name string, fn func(int, int), numTasks, sizeMB int) float64
 	runtime.GC()
 	time.Sleep(50 * time.Millisecond)
 
-	rssBefore := getCurrentRSSMB()
+	rssBefore := getRSSMB()
 
-	tracker := NewPeakMemoryTracker()
+	tracker := NewPeakMemoryTracker(5 * time.Millisecond)
 	tracker.Start()
 
 	start := time.Now()
@@ -129,7 +139,7 @@ func measureMemory(name string, fn func(int, int), numTasks, sizeMB int) float64
 	elapsed := time.Since(start)
 
 	peakRSS := tracker.Stop()
-	rssAfter := getCurrentRSSMB()
+	rssAfter := getRSSMB()
 
 	fmt.Printf("  Time: %.4f seconds\n", elapsed.Seconds())
 	fmt.Printf("  RSS before: %.2f MB\n", rssBefore)
@@ -146,7 +156,7 @@ func main() {
 	fmt.Printf("NumCPU: %d\n", runtime.NumCPU())
 	fmt.Printf("PID: %d\n", os.Getpid())
 
-	fmt.Println("\nNote: Go has no GIL - goroutines share memory and run in parallel")
+	fmt.Println("\nNote: Go has no GIL - goroutines share memory and can run in parallel")
 
 	fmt.Println("\n============================================================")
 	fmt.Println("MEMORY BENCHMARK (RSS-based)")
@@ -163,7 +173,7 @@ func main() {
 
 	runtime.GC()
 	time.Sleep(100 * time.Millisecond)
-	baselineRSS := getCurrentRSSMB()
+	baselineRSS := getRSSMB()
 	fmt.Printf("\nBaseline RSS: %.2f MB\n", baselineRSS)
 
 	fmt.Println("\n------------------------------------------------------------")
@@ -189,7 +199,7 @@ Expected results:
 - Single-threaded: ~%d MB peak (one task at a time, GC between)
 - Multi-threaded: ~%d MB peak (all goroutines run in parallel)
 
-Note: Go doesn't have built-in multiprocessing like Python.
-Goroutines already provide parallelism without process overhead.
+Note: Go doesn't need multiprocessing for CPU parallelism;
+goroutines already provide it without per-process interpreter overhead.
 `, sizeMB, numTasks*sizeMB)
 }

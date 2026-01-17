@@ -6,6 +6,7 @@ import os
 import gc
 from threading import Thread, Lock, Event
 from multiprocessing import Process, Value
+import mmap
 import ctypes
 
 try:
@@ -63,16 +64,21 @@ class PeakMemoryTracker:
             self._thread.join(timeout=1)
         return self.peak_rss
 
-
 def memory_intensive_task(size_mb=50):
+    # Allocate
     data = bytearray(size_mb * 1024 * 1024)
 
-    for i in range(0, len(data), 1024 * 1024):
-        data[i] = i % 256
+    # Touch each 4KB page so the OS commits the memory and RSS reflects it
+    page = mmap.PAGESIZE  # usually 4096
+    for i in range(0, len(data), page):
+        data[i] = (data[i] + 1) & 0xFF
 
-    time.sleep(0.1)
+    # Keep it alive briefly so the peak sampler has time to see it
+    time.sleep(0.2)
 
-    return sum(data[::1024 * 1024])
+    # Return something that depends on the buffer (prevents "too smart" elimination)
+    return data[0] + data[len(data) // 2] + data[-1]
+
 
 
 def memory_task_for_process(size_mb):
